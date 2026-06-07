@@ -1,0 +1,339 @@
+---
+title: "Global Fossil CO2 Emissions by Country and a Particular Focus on Canada"
+author: |
+  Samir Ahmadi
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+Introduction
+
+This study examines two related data sets across multiple scales to investigate greenhouse gas emissions. The first data set is a global fossil carbon dioxide data set that includes the annual emissions produced by each nation and is used to investigate long-term trends and international patterns.The second data set, which is obtained from Canada's Greenhouse Gas Reporting Program, includes emissions at the facility level divided into industrial groups and source types. These data sets were chosen because they provide different levels of depth while exploring the same overall issue. While the Canadian data set enables more in-depth analysis of the distribution of emissions across stated sources and industries, the global data set provides geographic analysis and country comparisons.
+
+The visualizations within this study explore a number of questions regarding emissions globally and in Canada:
+1. Which countries generated the most CO2 from fossil fuels in 2021?  
+2. How did emissions change over time for major emitters between 2002 and 2021? 
+3. Do countries with extremely high total emissions also have high emissions per person? 
+4 & 5. Which sources of emission make up the majority of reported facility emissions in Canada, and what is the significant difference between the industry groups?  
+6 & 7. Lastly, how are emissions spread geographically throughout the world, and how do the sources that contribute to emissions change between the major countries?
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+#Global and Canadian Greenhouse Gas Emissions
+
+#Required Libraries
+library(tidyverse)
+library(ggplot2)
+library(sf)
+library(ggthemes)
+library(scales)
+library(maps)
+library(ggalluvial)
+
+```
+
+```{r Setup of Gobal and Canadian Datasets}
+
+# Dataset 1: Global fossil CO2 emissions by country
+global_co2_raw <- read_csv("GCB2022v27_MtCO2_flat.csv", show_col_types = FALSE)
+
+# Dataset 2: Canadian GHGRP emissions by source (2022-2023)
+canada_ghg_raw <- read_csv("EmissionsSourcesGES-2022-2023.csv", show_col_types = FALSE)
+
+# Sample visual of datasets
+#glimpse(global_co2_raw)
+#glimpse(canada_ghg_raw)
+
+# Global Dataset Cleanup
+d_global <- global_co2_raw |>
+  rename(
+    country = Country,
+    iso3 = `ISO 3166-1 alpha-3`,
+    year = Year,
+    total = Total,
+    coal = Coal,
+    oil = Oil,
+    gas = Gas,
+    cement = Cement,
+    flaring = Flaring,
+    other = Other,
+    per_capita = `Per Capita`
+  ) |>
+  mutate(
+    year = as.numeric(year),
+    total = as.numeric(total),
+    per_capita = as.numeric(per_capita)
+  ) |>
+  filter(!is.na(country), !is.na(year), !is.na(total))
+
+# Keep the data as recent as possible across the multiple datasets for relevance and similarity.
+d_global_2021 <- d_global |>
+  filter(year == 2021) |>
+  filter(!country %in% c("Global", "International Transport"))
+
+# Top 20 countries by total fossil CO2 emissions in 2021
+d_top20_2021 <- d_global_2021 |>
+  arrange(desc(total)) |>
+  slice_head(n = 20)
+
+# Selected countries for the time-series graph.
+d_major_countries <- d_global |>
+  filter(country %in% c("Canada", "China", "United States", "India", "Russia", "Japan")) |>
+  filter(year >= 2002)
+
+# Canadian Dataset Cleanup
+
+# Keep only the columns needed for plotting and rename them.
+d_canada <- canada_ghg_raw |>
+  select(
+    `Facility GHGRP ID No. / Installation No d'identification du PDGES`,
+    `Reference Year / Année de référence`,
+    `Facility Name / Nom de l'installation`,
+    `Facility Province or Territory / Province ou territoire de l'installation`,
+    `English Facility NAICS Code Description / Description du code SCIAN de l'installation en anglais`,
+    `Emission Source / Source d'emission`,
+    `Total Emissions from Source (tonnes CO2e) / Émissions totales de la Source (tonnes éq. CO2)`,
+    `Total Facility Emissions (tonnes CO2e) / Émissions totales de l'installation (tonnes éq. CO2)`
+  ) |>
+  rename(
+    facility_id = `Facility GHGRP ID No. / Installation No d'identification du PDGES`,
+    year = `Reference Year / Année de référence`,
+    facility_name = `Facility Name / Nom de l'installation`,
+    province = `Facility Province or Territory / Province ou territoire de l'installation`,
+    naics_desc = `English Facility NAICS Code Description / Description du code SCIAN de l'installation en anglais`,
+    emission_source = `Emission Source / Source d'emission`,
+    total_source_co2e = `Total Emissions from Source (tonnes CO2e) / Émissions totales de la Source (tonnes éq. CO2)`,
+    total_facility_co2e = `Total Facility Emissions (tonnes CO2e) / Émissions totales de l'installation (tonnes éq. CO2)`
+  ) |>
+  mutate(
+    # Removes any extra and unneeded space
+    province = str_trim(province),
+    naics_desc = str_trim(naics_desc),
+    emission_source = str_trim(emission_source)
+  )
+
+
+# Keep only 2023 for the Canadian facility analysis.
+d_canada_2023 <- d_canada |>
+  filter(year == 2023)
+
+# Shorter source names make the legend easier to read.
+d_canada_2023 <- d_canada_2023 |>
+  mutate(
+    source_short = case_when(
+      str_detect(emission_source, "Stationary Fuel Combustion") ~ "Stationary Fuel Combustion",
+      str_detect(emission_source, "Industrial Process") ~ "Industrial Process",
+      str_detect(emission_source, "On-site Transportation") ~ "On-site Transportation",
+      str_detect(emission_source, "Wastewater") ~ "Wastewater",
+      str_detect(emission_source, "Waste") ~ "Waste",
+      str_detect(emission_source, "Venting") ~ "Venting",
+      str_detect(emission_source, "Flaring") ~ "Flaring",
+      str_detect(emission_source, "Leakage") ~ "Leakage",
+      TRUE ~ "Other"
+    )
+  )
+
+# Summarise by source type for the proportions plot.
+d_canada_source <- d_canada_2023 |> group_by(source_short) |> summarise(total_co2e = sum(total_source_co2e, na.rm = TRUE)) |> mutate(prop = total_co2e / sum(total_co2e), percent_label = scales::label_percent(accuracy = 1)(prop)) |> arrange(desc(total_co2e))
+
+# Keep facility-level data for the boxplot, but gather the industry groups.
+d_canada_facilities <- d_canada_2023 |>
+  filter(!is.na(naics_desc), !is.na(total_facility_co2e)) |>
+  mutate(industry_group = fct_lump_n(naics_desc, n = 8))
+
+```
+
+
+Graphics
+```{r Graph 1: Bar Chart}
+
+ggplot(d_top20_2021, aes(x = reorder(country, total), y = total, fill = total)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  scale_y_continuous(labels = scales::label_number(big.mark = ",")) +
+  scale_fill_viridis_c(labels = scales::label_number(big.mark = ",")) +
+  labs(
+    title = "Top 20 countries by fossil CO2 emissions in 2021",
+    x = "Country",
+    y = "Emissions (Million Tonnes of CO2)"
+  ) +
+  theme_minimal()
+
+```
+Figure 1: Top 20 countries by fossil CO2 emissions in 2021
+
+This bar chart shows that fossil CO2 emissions in 2021 were heavily concentrated among a small number of countries such as China, USA, and the countries with larger populations. The data indicates that a few countries contributed a much larger share of total global emissions than the rest.
+
+```{r Graph 2: Line Chart}
+
+ggplot(d_major_countries, aes(x = year, y = total, colour = country)) +
+  geom_line(linewidth = 1) +
+  scale_x_continuous(breaks = scales::breaks_width(4)) +
+  scale_y_continuous(labels = scales::label_number(big.mark = ",")) +
+  labs(
+    title = "Growth of Fossil CO2 Emissions Over Time (2002 - 2021)",
+    x = "Year",
+    y = "Emissions (MtCO2)",
+    colour = "Country"
+  ) +
+  theme_classic()
+```
+Figure 2: Growth of Fossil CO2 Emissions Over Time (2002 - 2021)
+
+This line chart shows how emissions changed over time for major countries between 2002 and 2021. The data indicates that emission growth was not the same across all countries, with some increasing more quickly than others over that period of time.
+
+```{r Graph 3: Scatterplot}
+
+ggplot(d_top20_2021, aes(x = total, y = per_capita, colour = country)) +
+  geom_point(size = 3, alpha = 0.7) +
+  scale_x_continuous(labels = scales::label_number(big.mark = ",")) +
+  labs(
+    title = "Total vs per-capita fossil CO2 emissions for top emitters, 2021",
+    x = "Total emissions (MtCO2)",
+    y = "Per-capita emissions",
+    colour = "Country"
+  ) +
+  theme_light() +
+  theme(
+    legend.text = element_text(size = 7),
+    legend.title = element_text(size = 8),
+    legend.key.height = unit(0.4, "cm"),
+    legend.key.width = unit(0.4, "cm"),
+    legend.spacing.y = unit(0.05, "cm")
+  )
+
+```
+Figure 3: Total vs per-capita fossil CO2 emissions for top emitters, 2021
+
+This scatterplot shows the relationship between total emissions and per-capita emissions for the top 20 countries that emit greenhouse gases in 2021. The data indicates that countries with large total emissions do not always have equally high emissions per person.
+total emissions -> how much a country emits overall
+per-capita emissions -> how much emissions there are per person
+
+```{r Graph 4: Pie Chart}
+ggplot(d_canada_source, aes(x = "", y = prop, fill = source_short)) +
+  geom_col(width = 1, color = "white") +
+  coord_polar(theta = "y") +
+  geom_text(
+    aes(label = percent_label),
+    position = position_stack(vjust = 0.5),
+    size = 2
+  ) +
+  scale_y_continuous(labels = scales::label_percent()) +
+  scale_fill_brewer(palette = "Set3") +
+  labs(
+    title = "Canadian reported facility emissions by source, 2023",
+    fill = "Emission source"
+  ) +
+  theme_void() +
+  theme(legend.position = "right")
+
+```
+Figure 4: Share of Canadian reported emissions by source type
+
+This pie chart showcases Canadian facility emissions divided into source types in 2023. According to the data, the majority of the reported emissions were attributed to a small number of source types.
+
+```{r Graph 5: Boxplot }
+ggplot(d_canada_facilities, aes(x = industry_group, y = total_facility_co2e)) +
+  geom_boxplot(aes(fill = industry_group), show.legend = FALSE) +
+  coord_flip() +
+  scale_y_continuous(labels = scales::label_number(big.mark = ",")) +
+  labs(
+    title = "Distribution of facility emissions across major industry groups, 2023",
+    x = "Industry group",
+    y = "Total facility emissions (tonnes CO2e)"
+  ) +
+  theme_bw()
+
+```
+Figure 5: Distribution of facility emissions across industry groups
+
+This boxplot showcases the differences in facility emissions between Canada's main industry types. The data indicates emissions were not distributed equally throughout facilities, with some industries having a greater range of emissions and more extreme values than others.
+box = middle half of the data
+line in box = median
+lines = usual spread
+dots = unusual values / outliers
+
+```{r Graph 6: Choropleth }
+
+# Load world map data and convert it to sf
+d_world <- st_as_sf(map("world", plot = FALSE, fill = TRUE))
+
+# Keep the map identifier
+d_world_map <- d_world |>
+  rename(country_map = ID) |>
+  select(country_map)
+
+# Create map-friendly names for a few countries before joining
+d_global_2021_map <- d_global_2021 |>
+  mutate(
+    country_map = recode(
+      country,
+      `United States` = "USA",
+      `United Kingdom` = "UK",
+      .default = country
+    )
+  )
+
+# Join the emissions data to the map boundaries
+d_world_joined <- left_join(d_world_map, d_global_2021_map, join_by(country_map))
+
+# Build the choropleth map
+ggplot(d_world_joined) +
+  geom_sf(aes(fill = total), color = NA) +
+  scale_fill_viridis_c(
+    labels = scales::label_number(big.mark = ","),
+    na.value = "grey90"
+  ) +
+  coord_sf() +
+  theme_map() +
+  theme(legend.position = "right") +
+  ggtitle("World fossil CO2 emissions by country, 2021") +
+  labs(fill = "MtCO2")
+
+```
+Figure 6: Choropleth map of world fossil CO2 emissions in 2021
+
+This choropleth map shows the geographic distribution of fossil CO2 emissions across countries in 2021. The data suggests that emissions were concentrated in specific parts of the world rather than being evenly spread across countries.
+
+```{r Graph 7: Alluvial Diagram }
+
+# Tidy source columns into long format for the Alluvial diagram
+d_source_mix <- d_global_2021 |>
+  filter(country %in% c("China", "United States", "India", "Russia", "Japan")) |>
+  select(country, coal, oil, gas, cement, flaring, other) |>
+  pivot_longer(
+    cols = c(coal, oil, gas, cement, flaring, other),
+    names_to = "source",
+    values_to = "mtco2"
+  ) |>
+  filter(!is.na(mtco2), mtco2 > 0)
+
+ggplot(d_source_mix, aes(axis1 = country, axis2 = source, y = mtco2)) +
+  geom_alluvium(aes(fill = source), width = 1/12) +
+  geom_stratum(width = 1/12, fill = "grey85", color = "grey40") +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), size = 3) +
+  scale_x_discrete(limits = c("Country", "Source"), expand = c(.1, .1)) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "Alluvial diagram of emissions source for the top five Countries with CO2 emissions, 2021",
+    x = NULL,
+    y = "Emissions (MtCO2)",
+    fill = "Source"
+  ) +
+  theme_minimal()
+
+```
+Figure 7: Alluvial diagram of emissions source for the top five Countries with CO2 emissions, 2021
+
+This alluvial diagram showcases the distribution of emissions between the top five Countries with CO2 emissions in 2021. According to the data, there were differences between the countries' overall emissions as well as the source that contributed to those emissions.
+
+Conclusion
+
+The graphics demonstrate the concentration of emission across all countries. It showcases that a large percentage of the world's fossil CO2 emissions come from a small number of countries, and the line graph demonstrates that growth has not occurred evenly across every country. The scatterplot demonstrates that emissions per person are not always high in countries with high overall emissions. The boxplot indicates that some industries have a far wider distribution of facility emissions than others, while the pie chart indicates that a few source types account for the majority of reported emissions. The alluvial diagram and choropleth map provide geographical and structural context by demonstrating the locations of concentrated emissions and the differences in their sources across major countries.
+
+
+References:
+Global Data set: https://www.kaggle.com/datasets/thedevastator/global-fossil-co2-emissions-by-country-2002-2022
+
+Canadian Data set: https://open.canada.ca/data/en/dataset/a8ba14b7-7f23-462a-bdbb-83b0ef629823
